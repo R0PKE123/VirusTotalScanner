@@ -1,8 +1,9 @@
 package com.VirusTotal.VirusTotalScanner.util;
 
 import com.VirusTotal.VirusTotalScanner.scanner.Scanner;
-import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -10,7 +11,7 @@ import org.springframework.stereotype.Service;
 public class StartupService {
     private final Scanner scanner;
 
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent.class)
     public void startup() {
         scanner.start();
     }
