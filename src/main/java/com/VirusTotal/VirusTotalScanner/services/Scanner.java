@@ -1,4 +1,4 @@
-package com.VirusTotal.VirusTotalScanner.scanner;
+package com.VirusTotal.VirusTotalScanner.services;
 
 import com.VirusTotal.VirusTotalScanner.entity.FileToScan;
 import com.VirusTotal.VirusTotalScanner.event.MalwareEvent;
@@ -81,24 +81,25 @@ public class Scanner {
     private void checkForViruses(List<FileToScan> filesToScan) {
         final RestTemplate restTemplate = new RestTemplate();
         List<String> analysesId = new ArrayList<>();
+        List<FileToScan> scannedFiles = new ArrayList<>();
         for (FileToScan fileToScan : filesToScan) {
             File file = new File(fileToScan.getDirectory());
             long fileSizeInBytes = file.length();
             if (fileSizeInBytes <= 32L * 1024 * 1024) {
-                uploadFilesLessThan33MB(fileToScan, restTemplate, analysesId);
+                scannedFiles.add(uploadFilesLessThan33MB(fileToScan, restTemplate, analysesId));
             } else if (wantToBeUploadingBigFiles && fileSizeInBytes <= maximumMbForBigFile * 1024L * 1024) {
-                uploadBiggerFiles(fileToScan, restTemplate, analysesId);
+                scannedFiles.add(uploadBiggerFiles(fileToScan, restTemplate, analysesId));
             }
         }
         Set<String> pending = new HashSet<>(analysesId);
         while (!pending.isEmpty()) {
             Thread.sleep(30000);
-            Iterator<String> iterator = pending.iterator();
-            while (iterator.hasNext()) {
-                String id = iterator.next();
-                if (checkScanStatus(id, restTemplate)) {
-                    iterator.remove();
-                }
+            pending.removeIf(id -> checkScanStatus(id, restTemplate));
+        }
+        for (FileToScan scannedFile : scannedFiles) {
+            Optional<FileToScan> file = fileToScanRepository.findByName(scannedFile.getName());
+            if (file.isPresent()) {
+                fileToScanRepository.save(scannedFile);
             }
         }
     }
@@ -121,17 +122,18 @@ public class Scanner {
                 log.info("Malicious file detected: ID=" + id + ", detections=" + malicious);
                 FileToScan file = fileToScanRepository.findByScanId(id).orElse(null);
                 if (file != null) {
-                    publisher.publishEvent(new MalwareEvent(this, malicious, file.getName()));
+                    publisher.publishEvent(new MalwareEvent(this, malicious, file.getDirectory()));
+                    log.info("File was malicious");
+                    return true;
                 }
             }
             log.info("File was not malicious");
             return true;
         }
-        log.info("File was not malicious");
         return false;
     }
 
-    private void uploadBiggerFiles(FileToScan fileToScan, RestTemplate restTemplate, List<String> analysesId) {
+    private FileToScan uploadBiggerFiles(FileToScan fileToScan, RestTemplate restTemplate, List<String> analysesId) {
         log.info("Uploading file up to " + maximumMbForBigFile + " MB");
         String url = "https://www.virustotal.com/api/v3/files/upload_url";
         HttpHeaders headers = new HttpHeaders();
@@ -150,12 +152,14 @@ public class Scanner {
             JSONObject json = new JSONObject(response2.getBody());
             analysesId.add(json.getJSONObject("data").getString("id"));
             fileToScan.setScanId(json.getJSONObject("data").getString("id"));
+            fileToScan.setWasChecked(true);
+            return fileToScan;
         } else {
             throw new RuntimeException("Failed to upload file: " + response2.getStatusCode());
         }
     }
 
-    private void uploadFilesLessThan33MB(FileToScan fileToScan, RestTemplate restTemplate, List<String> analysesId) {
+    private FileToScan uploadFilesLessThan33MB(FileToScan fileToScan, RestTemplate restTemplate, List<String> analysesId) {
         log.info("Uploading file up to 32 MB");
         String url = "https://www.virustotal.com/api/v3/files";
         HttpHeaders headers = new HttpHeaders();
@@ -170,46 +174,87 @@ public class Scanner {
             JSONObject json = new JSONObject(response.getBody());
             analysesId.add(json.getJSONObject("data").getString("id"));
             fileToScan.setScanId(json.getJSONObject("data").getString("id"));
+            fileToScan.setWasChecked(true);
+            return fileToScan;
         } else {
             throw new RuntimeException("Failed to upload file: " + response.getStatusCode());
         }
     }
 
     private List<FileToScan> findMoTWFiles(List<FileToScan> filesToScan) {
-        return filesToScan.stream().filter(fileToCheck -> hasMarkOfTheWeb(fileToCheck.getDirectory())).toList();
+        List<FileToScan> filesWithMoTW = filesToScan.stream().filter(fileToCheck -> hasMarkOfTheWeb(fileToCheck.getDirectory())).toList();
+        List<FileToScan> filesToSave = filesToScan.stream().filter(fileToScan -> !filesWithMoTW.contains(fileToScan)).toList();
+        filesToSave.forEach(file -> file.setWasChecked(true));
+        if (!filesToSave.isEmpty()) {
+            for (FileToScan file : filesToSave) {
+                fileToScanRepository.save(file);
+            }
+            wasDbModified = true;
+        }
+        return filesWithMoTW;
     }
 
     private List<FileToScan> detectNewFiles() {
         List<FileToScan> allFilesToScan = Arrays.stream(downloadsDir.listFiles()).map(file -> FileToScan.builder().name(file.getName()).directory(file.getPath()).build()).toList();
-        List<FileToScan> allFilesToScanThatAreNotInDB = allFilesToScan.stream().filter(fileToScan -> !getFileToScanByName(fileToScan.getName())).toList();
-        fileToScanRepository.saveAll(allFilesToScanThatAreNotInDB);
-        if (!allFilesToScanThatAreNotInDB.isEmpty()) {
-            wasDbModified = true;
-        }
-        return allFilesToScanThatAreNotInDB;
-    }
-
-    public boolean getFileToScanByName(final String name) {
-        Cache fileToScanCache = cacheManager.getCache("filesToScan");
-        if (fileToScanCache != null) {
-            Boolean doesFileToScanFromCacheExist = fileToScanCache.get(name, Boolean.class);
-            if (doesFileToScanFromCacheExist != null && wasDbModified) {
-//                log.info("Clearing cache");
-                fileToScanCache.clear();
-                wasDbModified = false;
-            } else if (doesFileToScanFromCacheExist != null) {
-//                log.info("Retrieved does file to scan exist from cache {}", doesFileToScanFromCacheExist);
-                return doesFileToScanFromCacheExist;
+        List<FileToScan> toReturn = new ArrayList<>();
+        List<FileToScan> toSave = new ArrayList<>();
+        for (FileToScan fileToScan : allFilesToScan) {
+            String statusOfFileToScan = getStatusOfFileToScanByName(fileToScan.getName());
+            switch (statusOfFileToScan) {
+                case "Was checked" -> {
+                }
+                case "Was not checked" -> toReturn.add(fileToScan);
+                case "Not present" -> {
+                    toSave.add(fileToScan);
+                    toReturn.add(fileToScan);
+                }
             }
         }
-//        log.info("Retrieving does file to scan exist from H2 database..............");
-        boolean doesFileToScanFromDBExists = fileToScanRepository.existsByName(name);
-        if (fileToScanCache != null) {
-            fileToScanCache.put(name, doesFileToScanFromDBExists);
-//            log.info("Putting does file to scan exist to the file to scan {} cache!", doesFileToScanFromDBExists);
+        if (!toSave.isEmpty()) {
+            fileToScanRepository.saveAll(toSave);
+            wasDbModified = true;
         }
-        return doesFileToScanFromDBExists;
+        return toReturn;
     }
+
+    public String getStatusOfFileToScanByName(final String name) {
+        Cache fileToScanCache = cacheManager.getCache("filesToScan");
+
+        if (fileToScanCache != null) {
+            String cachedResult = fileToScanCache.get(name, String.class);
+            if (cachedResult != null) {
+                if (wasDbModified) {
+                    fileToScanCache.clear();
+                    wasDbModified = false;
+                } else {
+                    return cachedResult;
+                }
+            }
+        }
+        Optional<FileToScan> fileOpt = fileToScanRepository.findByName(name);
+        boolean exists = fileOpt.isPresent();
+        boolean wasChecked = false;
+        if (exists) {
+            wasChecked = fileOpt.get().isWasChecked();
+        }
+        if (exists && wasChecked) {
+            if (fileToScanCache != null) {
+                fileToScanCache.put(name, "Was checked");
+            }
+            return "Was checked";
+        } else if (exists) {
+            if (fileToScanCache != null) {
+                fileToScanCache.put(name, "Was not checked");
+            }
+            return "Was not checked";
+        } else {
+            if (fileToScanCache != null) {
+                fileToScanCache.put(name, "Not present");
+            }
+            return "Not present";
+        }
+    }
+
 
     // Windows API interface for accessing alternate data streams
     public interface Kernel32 extends Library {

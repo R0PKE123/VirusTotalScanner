@@ -8,7 +8,6 @@ import java.util.Optional;
 
 @Repository
 public interface FileToScanRepository extends JpaRepository<FileToScan, Long> {
-    boolean existsByName(String name);
-
+    Optional<FileToScan> findByName(String name);
     Optional<FileToScan> findByScanId(String scanId);
 }

@@ -1,6 +1,6 @@
 package com.VirusTotal.VirusTotalScanner.util;
 
-import com.VirusTotal.VirusTotalScanner.scanner.Scanner;
+import com.VirusTotal.VirusTotalScanner.services.Scanner;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
