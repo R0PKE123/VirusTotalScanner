@@ -21,5 +21,5 @@ public class FileToScan {
     private String name;
     private String directory;
     private boolean wasChecked;
-    private String scanId;
+    private boolean isVirus;
 }

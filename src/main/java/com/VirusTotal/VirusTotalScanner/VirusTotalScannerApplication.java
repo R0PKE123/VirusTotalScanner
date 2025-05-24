@@ -9,5 +9,4 @@ public class VirusTotalScannerApplication {
     public static void main(String[] args) {
         SpringApplication.run(VirusTotalScannerApplication.class, args);
     }
-
 }

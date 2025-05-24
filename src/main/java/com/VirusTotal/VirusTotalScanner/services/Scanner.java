@@ -1,5 +1,6 @@
 package com.VirusTotal.VirusTotalScanner.services;
 
+import com.VirusTotal.VirusTotalScanner.config.UserPreferencesConfig;
 import com.VirusTotal.VirusTotalScanner.entity.FileToScan;
 import com.VirusTotal.VirusTotalScanner.event.MalwareEvent;
 import com.VirusTotal.VirusTotalScanner.repository.FileToScanRepository;
@@ -10,7 +11,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.json.JSONObject;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
 import org.springframework.context.ApplicationEventPublisher;
@@ -23,6 +23,8 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.File;
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static com.sun.jna.platform.win32.WinBase.INVALID_FILE_ATTRIBUTES;
 
@@ -35,14 +37,12 @@ public class Scanner {
     private final ApplicationEventPublisher publisher;
     File downloadsDir = new File(System.getenv("USERPROFILE") + "\\Downloads");
     private final CacheManager cacheManager;
-    @Value("${virustotal.api.key}")
-    private String apiKey;
-    @Value("${maximum.mb.forBigFile}")
-    private int maximumMbForBigFile;
-    @Value("${want.big.files}")
-    private boolean wantToBeUploadingBigFiles;
-    boolean wasDbModified = false;
-    private boolean shouldBeRunning = true;
+    static boolean wasDbModified = false;
+    private final UserPreferencesConfig userPreferencesConfig = new UserPreferencesConfig();
+    private final RestTemplate restTemplate = new RestTemplate();
+    private final String apiKey = userPreferencesConfig.getApiKey();
+    private final int maximumMbForBigFile = userPreferencesConfig.getMaximumMBForBigFile();
+    private final boolean wantToBeUploadingBigFiles = userPreferencesConfig.isWantBigFiles();
 
     public static boolean hasMarkOfTheWeb(String filePath) {
         if (filePath == null || filePath.isEmpty()) {
@@ -57,9 +57,10 @@ public class Scanner {
         }
     }
 
+    @SneakyThrows
     public void start() {
         log.info("Starting");
-        while (shouldBeRunning) {
+        while (true) {
             var newFiles = detectNewFiles();
             if (!newFiles.isEmpty()) {
                 log.info("Found new file/files");
@@ -69,17 +70,17 @@ public class Scanner {
                     checkForViruses(newFilesWithMoTW);
                 }
             }
+            Thread.sleep(3600000);
         }
     }
 
     public void stop() {
         log.info("Stopping");
-        shouldBeRunning = false;
+        System.exit(1);
     }
 
     @SneakyThrows
     private void checkForViruses(List<FileToScan> filesToScan) {
-        final RestTemplate restTemplate = new RestTemplate();
         List<String> analysesId = new ArrayList<>();
         List<FileToScan> scannedFiles = new ArrayList<>();
         for (FileToScan fileToScan : filesToScan) {
@@ -91,10 +92,17 @@ public class Scanner {
                 scannedFiles.add(uploadBiggerFiles(fileToScan, restTemplate, analysesId));
             }
         }
-        Set<String> pending = new HashSet<>(analysesId);
+        Map<String, FileToScan> pending = IntStream.range(0, analysesId.size())
+                .boxed()
+                .collect(Collectors.toMap(
+                        analysesId::get,
+                        scannedFiles::get
+                ));
         while (!pending.isEmpty()) {
-            Thread.sleep(30000);
-            pending.removeIf(id -> checkScanStatus(id, restTemplate));
+            Thread.sleep(30_000);
+            pending.entrySet().removeIf(e ->
+                    checkScanStatus(e.getKey(), e.getValue())
+            );
         }
         for (FileToScan scannedFile : scannedFiles) {
             Optional<FileToScan> file = fileToScanRepository.findByName(scannedFile.getName());
@@ -104,7 +112,7 @@ public class Scanner {
         }
     }
 
-    private boolean checkScanStatus(String id, RestTemplate restTemplate) {
+    private boolean checkScanStatus(String id, FileToScan fileToScan) {
         String url = "https://www.virustotal.com/api/v3/analyses/" + id;
         HttpHeaders headers = new HttpHeaders();
         headers.add("x-apikey", apiKey);
@@ -120,12 +128,13 @@ public class Scanner {
             int malicious = attributes.getJSONObject("stats").getInt("malicious");
             if (malicious >= 5) {
                 log.info("Malicious file detected: ID=" + id + ", detections=" + malicious);
-                FileToScan file = fileToScanRepository.findByScanId(id).orElse(null);
-                if (file != null) {
-                    publisher.publishEvent(new MalwareEvent(this, malicious, file.getDirectory()));
-                    log.info("File was malicious");
+                if (fileToScan != null) {
+                    publisher.publishEvent(new MalwareEvent(this, malicious, fileToScan));
+                    log.info("File was malicious, malware event published");
                     return true;
                 }
+                log.info("File was malicious");
+                return true;
             }
             log.info("File was not malicious");
             return true;
@@ -151,7 +160,6 @@ public class Scanner {
         if (response2.getStatusCode().is2xxSuccessful()) {
             JSONObject json = new JSONObject(response2.getBody());
             analysesId.add(json.getJSONObject("data").getString("id"));
-            fileToScan.setScanId(json.getJSONObject("data").getString("id"));
             fileToScan.setWasChecked(true);
             return fileToScan;
         } else {
@@ -173,7 +181,6 @@ public class Scanner {
             log.info("Uploaded successfully");
             JSONObject json = new JSONObject(response.getBody());
             analysesId.add(json.getJSONObject("data").getString("id"));
-            fileToScan.setScanId(json.getJSONObject("data").getString("id"));
             fileToScan.setWasChecked(true);
             return fileToScan;
         } else {
@@ -218,7 +225,7 @@ public class Scanner {
     }
 
     public String getStatusOfFileToScanByName(final String name) {
-        Cache fileToScanCache = cacheManager.getCache("filesToScan");
+        Cache fileToScanCache = cacheManager.getCache("filesToScanStatus");
 
         if (fileToScanCache != null) {
             String cachedResult = fileToScanCache.get(name, String.class);
