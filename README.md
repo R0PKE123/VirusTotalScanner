@@ -2,7 +2,7 @@
 This project is an apllication that automaticaly scans the download directory for viruses and shows a warning box if there is a virus detected by virus total and gives an option of deleting it
 # How to use it
 ## Installing
-Download the installer exe from the releases section and running it
+Download the installer exe from the releases section and run it
 ## Features
 A web interface at http://localhost:8080/, automatic startup, uninstaller.
 ## How to build it from source
