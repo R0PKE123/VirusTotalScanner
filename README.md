@@ -12,6 +12,7 @@ Run npm install and then npm run build --prod\
 Download this repo\
 Copy the contens of the browser folder inside of dist and VirusTotalScannerFrontend folders to this repo's src/main/resources/static folder \
 Run ./mvnw clean package -DskipTests in console \
-open the Setup.iss file and click Ctrl + f9 to compile, open the .exe in Output folder
+Download [this jdk](https://download.oracle.com/java/17/archive/jdk-17.0.12_windows-x64_bin.msi) and place it next to the Setup.iss
+Open the Setup.iss file and click Ctrl + f9 to compile, open the .exe in Output folder
 ## How to uninstall
 Go to setting apps search for Virus Total Scanner click the threee dots and click uninstall
